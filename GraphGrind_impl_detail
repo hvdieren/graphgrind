@@ -1,0 +1,195 @@
+GraphGrind
+===========================
+A Lightweight Graph Processing Framework for Shared Memory
+======================
+Three branch:
+1.numa use NUMA-AWARE allocation for partitioned_graph, data array
+2.simpe use no numa, only new[] to allocate
+3. onlygraph only graph use NUMA-AWARE allocation
+
+
+Compilation
+--------
+
+Recommended environment
+
+* Intel icpc compiler
+* g++ &gt;= 4.8.0 with support for Cilk+,
+* or Clang + LLVM using swan with NUMA
+
+To compile with clang using Cilk, define the environment variable
+CILK. To compile with icpc, define the environment variable MKLROOT
+and make sure CILK is not defined.
+
+In hpdc cluster, the setting:
+module load compilers/gcc-4.9.0
+export LD_LIBRARY_PATH="the swan + llvm folder"
+
+```
+$ make -j 16
+```
+
+This is to compile and build with 16 threads in parallel. You can use the
+number of your choice.
+
+Run Examples
+-------
+Example of running the code: An example unweighted graph
+rMatGraph_J_5_100 and weighted graph rMatGraph_WJ_5_100 are
+provided. Symmetric graphs should be called with the "-s"
+flag for better performance. For example:
+
+```
+$ ./BFS -s rMatGraph_J_5_100
+$ ./BellmanFord -s rMatGraph_WJ_5_100
+```
+
+For BFS, BC and BellmanFord, one can also pass the "-r" flag followed
+by an integer to indicate the source vertex.
+
+Weighted Graph Algorithm: BellmanFord, SPMV
+Not weighted graph requirement algorithm: BFS, BC, Components, PageRank, PageRankDelta, BP
+
+
+Implementation Details:
+There are several tags for different optimisation:
+
+1) NUMA -- For NUMA allocation and cilk_for_numa(), for cilk_for using NUMA optimization using cilk_for_numa
+           ligra-numa.h and graph-numa.h use special NUMA_AWARE allocator in the mm.h
+	   If there is no numa, use ligra.h and grpah.h use the C++ new to allocate the array
+
+2) COMPRESSED_VERTICES -- Compressing vertices of each partitioned_graph to save the memory space
+                          remove the vertices without in-degree or out-degree
+
+3) PULL_EDGES  -- edgelist traversal to improve locality
+4) COMPRESSED_CSCCSR  --Compressing vertices of each partitioned_graph, but CSC compression for backward
+			and CSR compression for forward
+
+By default, the applications are run one times,
+with times reported for the last three runs. This can be changed by
+passing the flag "-rounds" followed by an integer indicating the
+number of timed runs.
+
+
+Graph Partition:
+graph.h file contains the graph partitioning method, mmap_hugepage method and some classes.
+Class : Vertex, graph, partitioned_graph, partitioner
+Method: 3-way partitioning
+   1) Partition by source : The graph will partitioned by source vertex, means all the home
+                            vertices contain all out-degree, part in-degree
+                            Backward : will iterate from 0-N (whole range)
+                            Forward  : will iterate with limited range (rangeLow, rangeHi)
+                                       based on partitioning range
+
+   2) Partition by destination: The graph will partitioned by destination vertex, means all
+                                the home vertices contain all in-degree, part out-degree
+                                backward : will iterate with limited range
+                                Forward : will iterate from 0-N (whole range)
+
+   3) Mixed partition : First whole graph partitioning by destination  PG1, PG2.
+                        And then PG1 and PG2 will be partitioned by source, PG1-1, PG1-2,
+                        PG2-1, PG2-2
+                        Backward : will iterate limited range (partitionBydest calculate)
+                        Forward  : will iterate limited range (partitionBysour re-calculate with total requirement partition number)
+
+All the partitioned method are in the graph.h
+graph.h contains vertex class, graph class, partitioned_graph class and mmap_hugepage class
+
+Data Structure
+### Data Structure ###
+
+**partitioned_vertices**: a dynamic representation a subset vertices of vertices
+                          contains : a whole boolean array for edgeMapDense()
+                                     a whole integer array for edgeMapSparse()
+
+### Functions ###
+
+**edgeMap**: takes as input 3 required arguments and 3 optional arguments:
+a partitioned_graph *PG*, partitioned_vertices *PV*, struct *F*, threshold argument
+(optional, default threshold is *m*/20), an option in {DENSE,
+DENSE_FORWARD} (optional, default value is DENSE), and a boolean
+indiciating whether to remove duplicates (optional, default does not
+remove duplicates). It returns as output a partitioned_vertices Out
+
+The *F* struct contains three boolean functions: update, updateAtomic
+and cond.  update and updateAtomic should take two integer arguments
+(corresponding to source and destination vertex). In addition,
+updateAtomic should be atomic with respect to the destination
+vertex. cond takes one argument corresponding to a vertex.  For the
+cond function which always returns true, cond_true can be called.
+For Backward, some function use the cache() to avoid the data race.
+
+```
+struct F {
+    inline void create_cache(cache_t &cache, intT d){
+          //fill in
+    }
+
+    inline bool update(cache_t &cache, intT s){
+          //fill in
+    }
+
+    inline void commit_cache(cache_t &cache, intT d){
+          //fill in
+    }
+    inline bool update (intT s, intT d) {
+     //fill in
+    }
+    inline bool updateAtomic (intT s, intT d){
+     //fill in
+    }
+    inline bool cond (intT d) {
+     //fill in
+    }
+};
+```
+
+ligra.h contains all the core traversal computation functions: edgeMapDense,
+edgeMapDenseForward, edgeMapDenseCompressed, edgeMapDenseForwardCompressed and
+edgeMapSparse
+
+```
+if (m+outdegree>threshold){
+    if(Froward){
+        if(Compressed) for (int i=0; i<partition_number;i++) edgeMapDenseForwardCompressed(PG(i),PV);
+        else for (int i=0; i<partition_number;i++) edgeMapDenseForward(PG(i),PV);
+    }
+    else{
+        if(Compressed) for (int i=0; i<partition_number;i++) edgeMapDenseCompressed(PG(i),PV);
+        else for (int i=0; i<partition_number;i++) edgeMapDense(PG(i),PV);
+    }
+    }
+else{
+edgeMapSparse(WholeGraph, PV);
+}
+```
+Backward/Forward: two operator for different vertex traversal
+Arguments:
+intT src : source vertices id
+intT pos : the destination vertices current position within the V[src].getOutdegree().
+intT dst : destination vertices id
+intE w   : weighted value of source vertices
+F f : struct function
+bool * frontier: current whole boolean active vertices array
+                 previous iteration computation value
+bool * next : next whole boolean active vertices array
+              current iteration computation value
+
+Backward operator:
+edgeOpIn() to call edgeOpBwd () (sequential)/edgeOpBwdAtomic() (Atomic update)
+
+edgeOpBwd () /edgeOpBwdAtomic()
+{
+   check the destination vertices active status,
+   and update value and status to source vertices
+}
+
+
+Forward operator:
+edgeOpOut() to call edgeOpFwd ()
+
+edgeOpFwd ()
+{
+   check the source vertices active status,
+   and update value and status to destination vertices
+}
